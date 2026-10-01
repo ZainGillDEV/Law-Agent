@@ -5,7 +5,8 @@ lawyer wahin se continue karta hai jahan chhoda tha.
 """
 from datetime import date
 
-from db import get_session, insert_case, list_active_cases, set_session, update_hearing
+from db import (get_session, insert_case, link_file_to_case, list_active_cases,
+                set_session, update_hearing)
 from deadline_engine import (
     DISCLAIMER, RULES, RULES_BY_KEY, compute_deadline,
     format_deadline_reply, parse_date, rule_from_menu_choice, rules_menu,
@@ -29,6 +30,7 @@ MAIN_MENU = (
     "1. Add case — naya case add karein\n"
     "2. List cases — apne cases dekhein\n"
     "3. Update hearing — agli peshi ki date badlein\n\n"
+    "📄 Kisi bhi waqt PDF bhej kar summary le sakte hain.\n"
     "Kisi bhi waqt *cancel* likh kar wapas aa sakte hain."
 )
 
@@ -219,6 +221,32 @@ def _update_date(phone, msg, low, draft):
     return [f"✅ Next hearing update ho gayi: *{d.strftime('%d %b %Y')}*"]
 
 
+# ---------- File ko case se jodna (Phase 4) ----------
+def ask_link_file(phone: str, file_id: str) -> str | None:
+    """Summary ke baad poochho ke file kis case ki hai. Lawyer kisi aur flow mein ho to mat poochho."""
+    step, _ = get_session(phone)
+    if step != "idle":
+        return None
+    cases = list_active_cases(phone)
+    if not cases:
+        return None
+    set_session(phone, "awaiting_file_case",
+                {"file_id": file_id, "case_ids": [c["case_id"] for c in cases]})
+    return _cases_text(cases) + "\n\n📎 Yeh file kis case ki hai? *Number* bhejein, ya *skip* likhein."
+
+
+def _file_case(phone, msg, low, draft):
+    if low in SKIP:
+        set_session(phone, "idle")
+        return ["👍 File bina case ke save ho gayi."]
+    ids = draft.get("case_ids", [])
+    if not low.isdigit() or not 1 <= int(low) <= len(ids):
+        return [f"⚠️ 1 se {len(ids)} tak number bhejein, ya *skip* likhein."]
+    link_file_to_case(phone, draft["file_id"], ids[int(low) - 1])
+    set_session(phone, "idle")
+    return ["✅ File case se jod di gayi."]
+
+
 # ---------- State table (PRD Section 7) ----------
 STEPS = {
     "idle": _idle,
@@ -231,4 +259,5 @@ STEPS = {
     "confirm_summary": _confirm,
     "awaiting_update_choice": _update_choice,
     "awaiting_update_date": _update_date,
+    "awaiting_file_case": _file_case,
 }

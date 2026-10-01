@@ -63,3 +63,16 @@ def send_template(to: str, name: str, params: list[str], lang: str = "en") -> di
     if r.status_code >= 400:
         log.error("send_template %s failed %s: %s", name, r.status_code, r.text)
     return r.json() if r.content else {}
+
+
+def download_media(media_id: str) -> bytes:
+    """WhatsApp media ID se file download karo (2 steps: URL lo, phir file)."""
+    version = os.environ.get("GRAPH_API_VERSION", "v25.0")
+    meta = httpx.get(f"https://graph.facebook.com/{version}/{media_id}",
+                     headers=_headers(), timeout=15)
+    meta.raise_for_status()
+    url = meta.json()["url"]
+    r = httpx.get(url, headers={"Authorization": f"Bearer {os.environ['WHATSAPP_TOKEN']}"},
+                  timeout=60, follow_redirects=True)
+    r.raise_for_status()
+    return r.content

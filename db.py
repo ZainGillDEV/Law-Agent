@@ -72,3 +72,16 @@ def update_hearing(phone: str, case_id: str, new_date_iso: str) -> None:
         .eq("lawyer_phone", phone)  # doosre lawyer ka case kabhi update na ho
         .execute()
     )
+    # ---------- Case files ----------
+def insert_case_file(row: dict) -> dict:
+    return supabase.table("case_files").insert(row).execute().data[0]
+
+
+def link_file_to_case(phone: str, file_id: str, case_id: str) -> None:
+    (
+        supabase.table("case_files")
+        .update({"case_id": case_id})
+        .eq("file_id", file_id)
+        .eq("lawyer_phone", phone)
+        .execute()
+    )
