@@ -13,6 +13,7 @@ from deadline_engine import (
 
 # ---------- Keywords (English + Roman Urdu) ----------
 CANCEL = {"cancel", "stop", "band", "ruko", "exit", "khatam", "wapas"}
+MENU_WORDS = {"menu", "help", "hi", "hello", "salam", "aoa", "start", "assalam o alaikum"}
 YES = {"1", "yes", "y", "haan", "han", "ha", "ji", "confirm", "ok", "save"}
 NO = {"2", "no", "n", "nahi", "nahin", "na"}
 SKIP = {"skip", "nahi", "nahin", "no", "-", "pata nahi"}
@@ -45,6 +46,12 @@ def handle_text(phone: str, text: str) -> list[str]:
     if low in CANCEL:
         set_session(phone, "idle")
         return ["❌ Cancelled.", MAIN_MENU] if step != "idle" else [MAIN_MENU]
+
+    # "menu" / "hi" kisi bhi step se lawyer ko wapas main menu pe le aaye
+    if low in MENU_WORDS:
+        if step != "idle":
+            set_session(phone, "idle")
+        return [MAIN_MENU]
 
     handler = STEPS.get(step, _idle)
     return handler(phone, msg, low, draft)

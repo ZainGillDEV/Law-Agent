@@ -42,3 +42,24 @@ def mark_as_read(message_id: str) -> None:
     r = httpx.post(_url("messages"), headers=_headers(), json=payload, timeout=15)
     if r.status_code >= 400:
         log.warning("mark_as_read failed %s: %s", r.status_code, r.text)
+
+
+def send_template(to: str, name: str, params: list[str], lang: str = "en") -> dict:
+    """Approved template bhejo (24-hour window ke bahar bhi chalta hai)."""
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "template",
+        "template": {
+            "name": name,
+            "language": {"code": lang},
+            "components": [{
+                "type": "body",
+                "parameters": [{"type": "text", "text": str(p)} for p in params],
+            }],
+        },
+    }
+    r = httpx.post(_url("messages"), headers=_headers(), json=payload, timeout=15)
+    if r.status_code >= 400:
+        log.error("send_template %s failed %s: %s", name, r.status_code, r.text)
+    return r.json() if r.content else {}
