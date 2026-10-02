@@ -6,7 +6,7 @@ import os
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from conversation_graph import MAIN_MENU, ask_link_file, handle_text
+from conversation_graph import ask_link_file, handle_text, needs_onboarding, onboarding_prompt
 from db import ensure_lawyer
 from file_pipeline import process_pdf
 from whatsapp_client import mark_as_read, send_text
@@ -67,15 +67,22 @@ def handle_message(msg: dict, value: dict, background_tasks: BackgroundTasks) ->
     name = contacts[0].get("profile", {}).get("name") if contacts else None
     mtype = msg.get("type")
 
-    log.info("Message from %s (%s), type=%s", phone, name, mtype)
+    log.info("Message from %s, type=%s", phone, mtype)
     mark_as_read(msg_id)
 
-    is_new = ensure_lawyer(phone, name)
-    if is_new:
-        send_text(phone, f"Assalam-o-Alaikum {name or ''}! 👋\nLawAiAgent mein khush aamdeed.")
-        if mtype == "text":
-            send_text(phone, MAIN_MENU)
-            return
+    # Naya lawyer register hota hai; naam/shehar/manzoori onboarding mein li jati hai
+    ensure_lawyer(phone, name)
+
+    if mtype == "text":
+        for reply in handle_text(phone, msg["text"]["body"]):
+            send_text(phone, reply)
+        return
+
+    # Text ke ilawa kuch bhi: pehle onboarding mukammal ho
+    if needs_onboarding(phone):
+        for reply in onboarding_prompt(phone):
+            send_text(phone, reply)
+        return
 
     if mtype == "document":
         doc = msg["document"]
@@ -91,12 +98,7 @@ def handle_message(msg: dict, value: dict, background_tasks: BackgroundTasks) ->
         send_text(phone, "📷 Photos abhi support nahi hain. Document ko *PDF* bana ke bhejein.")
         return
 
-    if mtype != "text":
-        send_text(phone, "Abhi sirf text messages aur PDF files support hain.")
-        return
-
-    for reply in handle_text(phone, msg["text"]["body"]):
-        send_text(phone, reply)
+    send_text(phone, "Abhi sirf text messages aur PDF files support hain.")
 
 
 def _process_document(phone: str, media_id: str, filename: str) -> None:

@@ -5,10 +5,15 @@ from dotenv import load_dotenv
 from supabase import create_client
 
 load_dotenv(override=True)
+
 supabase = create_client(
     os.environ["SUPABASE_URL"],
     os.environ["SUPABASE_SERVICE_KEY"],
 )
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------- Lawyers ----------
@@ -23,6 +28,22 @@ def ensure_lawyer(phone: str, name: str | None = None) -> bool:
     supabase.table("lawyers").insert({"phone_number": phone, "name": name}).execute()
     supabase.table("session_state").insert({"lawyer_phone": phone}).execute()
     return True
+
+
+def get_lawyer(phone: str) -> dict | None:
+    res = (
+        supabase.table("lawyers").select("phone_number, name, city, accepted_at")
+        .eq("phone_number", phone).limit(1).execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def update_lawyer(phone: str, fields: dict) -> None:
+    supabase.table("lawyers").update(fields).eq("phone_number", phone).execute()
+
+
+def accept_terms(phone: str) -> None:
+    update_lawyer(phone, {"accepted_at": _now()})
 
 
 # ---------- Conversation state ----------
@@ -42,7 +63,7 @@ def set_session(phone: str, step: str, draft: dict | None = None) -> None:
         "lawyer_phone": phone,
         "current_step": step,
         "draft_case_json": draft or {},
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": _now(),
     }).execute()
 
 
@@ -72,7 +93,9 @@ def update_hearing(phone: str, case_id: str, new_date_iso: str) -> None:
         .eq("lawyer_phone", phone)  # doosre lawyer ka case kabhi update na ho
         .execute()
     )
-    # ---------- Case files ----------
+
+
+# ---------- Case files ----------
 def insert_case_file(row: dict) -> dict:
     return supabase.table("case_files").insert(row).execute().data[0]
 
