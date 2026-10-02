@@ -16,6 +16,9 @@ DISCLAIMER = "⚠️ Verify independently — not a substitute for professional 
 DATA_FILE = Path(__file__).with_name("limitation_articles.json")
 SCHEDULE = "Limitation Act 1908, First Schedule"
 
+# Applications covered by Sec. 12(2): leave to appeal (170, 179) and review (161, 162, 173).
+COPY_TIME_APPLICATIONS = {"161", "162", "170", "173", "179"}
+
 
 @dataclass(frozen=True)
 class Article:
@@ -30,6 +33,12 @@ class Article:
     needs_review: bool = False
     note: str = ""
     source: str = SCHEDULE
+
+    @property
+    def copy_time_excluded(self) -> bool:
+        """Sec. 12(2): appeals, leave-to-appeal and review applications exclude
+        the time needed to get a certified copy of the decree/order."""
+        return self.division == "Appeals" or self.article in COPY_TIME_APPLICATIONS
 
     @property
     def citation(self) -> str:
@@ -80,6 +89,8 @@ class DeadlineResult:
     article: Article
     start_date: date
     rolled_forward: bool  # Section 4: court closed on last day -> next working day
+    excluded_days: int = 0          # Sec. 12(2): certified-copy days added
+    copy_status: str = "n/a"        # n/a | added | not_given | pending | late | invalid
 
 
 def _add_months(d: date, months: int) -> date:
@@ -91,7 +102,10 @@ def _add_months(d: date, months: int) -> date:
 
 
 def compute_deadline(article_no: str, start_date: date,
-                     holidays: frozenset[date] = frozenset()) -> DeadlineResult:
+                     holidays: frozenset[date] = frozenset(),
+                     copy_applied: date | None = None,
+                     copy_received: date | None = None,
+                     copy_pending: bool = False) -> DeadlineResult:
     art = get_article(article_no)
     if art is None:
         raise KeyError(f"Unknown article: {article_no}")
@@ -101,13 +115,32 @@ def compute_deadline(article_no: str, start_date: date,
     deadline = _add_months(start_date, art.years * 12 + art.months)
     deadline += timedelta(days=art.days)
 
+    # Section 12(2): exclude the time requisite for obtaining a certified copy.
+    # Counted as (received - applied) days: the conservative (earlier) reading.
+    # Only applies if the copy was applied for before the ordinary period expired.
+    excluded, status = 0, "n/a"
+    if art.copy_time_excluded:
+        if copy_applied and copy_received:
+            if copy_applied < start_date or copy_received < copy_applied:
+                status = "invalid"
+            elif copy_applied > deadline:
+                status = "late"
+            else:
+                excluded = (copy_received - copy_applied).days
+                deadline += timedelta(days=excluded)
+                status = "added"
+        elif copy_applied and copy_pending:
+            status = "pending"
+        else:
+            status = "not_given"
+
     # Section 4: if the court is closed on the last day, file on the next working day.
     rolled = False
     while deadline.weekday() == 6 or deadline in holidays:  # 6 = Sunday
         deadline += timedelta(days=1)
         rolled = True
 
-    return DeadlineResult(deadline, art, start_date, rolled)
+    return DeadlineResult(deadline, art, start_date, rolled, excluded, status)
 
 
 def article_card(art: Article) -> str:
@@ -160,6 +193,17 @@ def format_deadline_reply(result: DeadlineResult) -> str:
         f"Counted from: {a.starts_from} ({result.start_date.strftime('%d %b %Y')})\n"
         f"Reference: {a.citation}\n"
     )
+    copy_notes = {
+        "added": f"📑 Certified copy ke {result.excluded_days} din shamil kiye gaye (Sec. 12(2)).\n",
+        "not_given": "📑 Certified copy ke din shamil nahi kiye. Copy ka waqt jodne se asal "
+                     "deadline aage ho sakti hai (Sec. 12(2)).\n",
+        "pending": "📑 Copy abhi nahi mili. Yeh sab se pehli mumkina date hai; copy milne ke din "
+                   "jodne se deadline aage jayegi (Sec. 12(2)).\n",
+        "late": "📑 Copy ki darkhwast muddat guzarne ke baad di gayi, is liye copy ke din "
+                "shamil nahi kiye (Sec. 12(2)).\n",
+        "invalid": "📑 Copy ki dates aapas mein mel nahi khatin, is liye shamil nahi ki gayin.\n",
+    }
+    msg += copy_notes.get(result.copy_status, "")
     if result.rolled_forward:
         msg += "ℹ️ Last day was a court holiday, moved to next working day (Sec. 4).\n"
     if a.needs_review:

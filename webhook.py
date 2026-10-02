@@ -6,7 +6,8 @@ import os
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from conversation_graph import ask_link_file, handle_text, needs_onboarding, onboarding_prompt
+from conversation_graph import (ask_link_file, handle_text, needs_onboarding,
+                                offer_case_from_pdf, onboarding_prompt)
 from db import ensure_lawyer
 from file_pipeline import process_pdf
 from whatsapp_client import mark_as_read, send_text
@@ -104,12 +105,14 @@ def handle_message(msg: dict, value: dict, background_tasks: BackgroundTasks) ->
 def _process_document(phone: str, media_id: str, filename: str) -> None:
     """Background mein chalta hai, webhook ko 200 dene ke baad."""
     try:
-        reply, file_id = process_pdf(phone, media_id, filename)
+        reply, file_id, case_info = process_pdf(phone, media_id, filename)
         send_text(phone, reply)
-        if file_id:
-            prompt = ask_link_file(phone, file_id)
-            if prompt:
-                send_text(phone, prompt)
+        if not file_id:
+            return
+        # PDF se case ki details milein to case ka card, warna file ko purane case se jodne ka sawal
+        prompt = offer_case_from_pdf(phone, file_id, case_info) or ask_link_file(phone, file_id)
+        if prompt:
+            send_text(phone, prompt)
     except Exception:
         log.exception("PDF processing failed")
         send_text(phone, "⚠️ File process nahi ho saki. Thori dair baad dobara try karein.")

@@ -4,6 +4,7 @@ import uuid
 
 from pypdf import PdfReader
 
+from case_extractor import extract_case
 from db import insert_case_file, supabase
 from llm_client import chat
 from whatsapp_client import download_media
@@ -40,11 +41,11 @@ def extract_text(data: bytes) -> str:
     return "\n".join((page.extract_text() or "") for page in reader.pages)
 
 
-def process_pdf(phone: str, media_id: str, filename: str) -> tuple[str, str | None]:
-    """Returns (lawyer ko bhejne wala jawab, file_id ya None)."""
+def process_pdf(phone: str, media_id: str, filename: str) -> tuple[str, str | None, dict | None]:
+    """Returns (lawyer ko bhejne wala jawab, file_id ya None, PDF se nikli case details ya None)."""
     data = download_media(media_id)
     if len(data) > MAX_BYTES:
-        return "⚠️ File 10 MB se bari hai. Chhoti file bhejein.", None
+        return "⚠️ File 10 MB se bari hai. Chhoti file bhejein.", None, None
 
     # Private bucket mein save: har lawyer ka apna folder
     path = f"{phone}/{uuid.uuid4()}.pdf"
@@ -57,10 +58,11 @@ def process_pdf(phone: str, media_id: str, filename: str) -> tuple[str, str | No
         row = insert_case_file({"lawyer_phone": phone, "file_path": path, "ai_summary": None})
         return ("⚠️ Is PDF se text nahi nikla. Lagta hai yeh scanned ya photo wali PDF hai.\n"
                 "File save ho gayi hai, lekin summary ke liye text-based PDF bhejein. "
-                "Scanned documents ka support jald aa raha hai."), row["file_id"]
+                "Scanned documents ka support jald aa raha hai."), row["file_id"], None
 
     summary = chat(SYSTEM_PROMPT,
                    f"File name: {filename}\n\n<document>\n{text[:MAX_CHARS]}\n</document>")
+    case_info = extract_case(text)
 
     row = insert_case_file({"lawyer_phone": phone, "file_path": path, "ai_summary": summary})
 
@@ -68,4 +70,4 @@ def process_pdf(phone: str, media_id: str, filename: str) -> tuple[str, str | No
     if len(text) > MAX_CHARS:
         reply += "\n\nℹ️ Document lamba tha, sirf pehle hisse ki summary bani hai."
     reply += "\n\n⚠️ AI-generated summary. Original document se verify karein."
-    return reply, row["file_id"]
+    return reply, row["file_id"], case_info

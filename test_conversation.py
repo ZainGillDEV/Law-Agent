@@ -17,10 +17,11 @@ fake_db.update_lawyer = lambda phone, fields: _lawyers.setdefault(phone, {}).upd
 fake_db.accept_terms = lambda phone: _lawyers.setdefault(phone, {}).update({"accepted_at": "now"})
 fake_db.get_session = lambda phone: _sessions.get(phone, ("idle", {}))
 fake_db.set_session = lambda phone, step, draft=None: _sessions.__setitem__(phone, (step, draft or {}))
-fake_db.insert_case = lambda row: _cases.append(row) or row
+fake_db.insert_case = lambda row: _cases.append({**row, "case_id": f"c{len(_cases)+1}"}) or _cases[-1]
 fake_db.list_active_cases = lambda phone: [c for c in _cases if c["lawyer_phone"] == phone]
 fake_db.update_hearing = lambda *a: None
-fake_db.link_file_to_case = lambda *a: None
+_links: list = []
+fake_db.link_file_to_case = lambda phone, file_id, case_id: _links.append((file_id, case_id))
 sys.modules["db"] = fake_db
 
 # ---------- Fake LLM ----------
@@ -28,7 +29,7 @@ fake_llm = types.ModuleType("llm_client")
 fake_llm.chat = lambda system, user, **kw: '{"articles": ["152", "156"]}'
 sys.modules["llm_client"] = fake_llm
 
-from conversation_graph import handle_text  # noqa: E402
+from conversation_graph import handle_text, offer_case_from_pdf  # noqa: E402
 
 PHONE = "923000000000"
 
@@ -41,6 +42,7 @@ def setup_function():
     _sessions.clear()
     _cases.clear()
     _lawyers.clear()
+    _links.clear()
     _lawyers[PHONE] = {"name": "Adv. Test", "accepted_at": "earlier"}  # already onboarded
     sys.modules["llm_client"] = fake_llm  # other test files may have swapped it
 
@@ -90,6 +92,7 @@ def test_add_case_with_ai_suggestion():
     assert "Art. 152" in say("1")             # lawyer confirms suggestion 1
     assert "date of the decree" in say("Ali vs Ahmed").lower()
     say(decree.strftime("%d/%m/%Y"))
+    say("skip")                                # no certified-copy dates
     say("Civil Court Lahore")
     say("skip")
     reply = say("1")
@@ -128,3 +131,122 @@ def test_menu_escapes_any_step():
     say("Civil judge ke decree ke khilaf appeal")
     assert "LawAiAgent Menu" in say("menu")
     assert _sessions[PHONE][0] == "idle"
+
+
+# ---------- Sec. 12(2) in the conversation ----------
+def test_appeal_asks_copy_dates_and_adds_them():
+    say("1")
+    say("art 152")
+    say("Kamran vs Arslan")
+    assert "Certified copy" in say("18/09/2026")
+    assert "kis date ko mili" in say("20/09/2026")
+    assert "10 din" in say("30/09/2026")
+    say("District Judge Lahore")
+    assert "Certified copy: apply" in say("skip")
+    reply = say("1")
+    assert "28 Oct 2026" in reply and "10 din shamil" in reply
+    assert _cases[0]["copy_received_date"] == "2026-09-30"
+
+
+def test_appeal_copy_skip():
+    say("1")
+    say("art 152")
+    say("Test")
+    say("18/09/2026")
+    assert "Court ka naam" in say("skip")
+    say("Court")
+    say("skip")
+    assert "19 Oct 2026" in say("1")
+
+
+def test_suit_does_not_ask_copy_dates():
+    say("1")
+    say("art 57")
+    say("Loan case")
+    assert "Court ka naam" in say("05/03/2024")
+
+
+# ---------- PDF -> full case ----------
+PDF_INFO = {
+    "document_type": "Judgment",
+    "court": "Senior Civil Judge, Lahore",
+    "case_number": "Civil Suit No. 1187 of 2025",
+    "case_title": "Muhammad Arslan Tariq vs Kamran Yousaf",
+    "decision_date": "2026-09-18",
+    "next_hearing_date": "2026-10-28",
+    "deadline_question": "Civil appeal against decree of Senior Civil Judge to District Judge",
+}
+
+
+def _card():
+    _sessions[PHONE] = ("idle", {})
+    return offer_case_from_pdf(PHONE, "file-9", PDF_INFO)
+
+
+def test_pdf_card_shows_details_and_articles():
+    card = _card()
+    assert "Muhammad Arslan Tariq vs Kamran Yousaf" in card
+    assert "18 Sep 2026 (Friday)" in card and "28 Oct 2026" in card
+    assert "Art. 152" in card                   # fake LLM suggests 152 and 156
+
+
+def test_pdf_case_one_tap_with_copy_dates():
+    _card()
+    assert "Certified copy" in say("1")          # pick Art. 152 -> appeal -> copy question
+    say("20/09/2026")
+    reply = say("30/09/2026")                    # saved straight away, no court/hearing questions
+    assert "Case saved" in reply and "28 Oct 2026" in reply
+    c = _cases[0]
+    assert c["title"] == "Muhammad Arslan Tariq vs Kamran Yousaf"
+    assert c["court"] == "Senior Civil Judge, Lahore"
+    assert c["case_number"] == "Civil Suit No. 1187 of 2025"
+    assert c["filing_date"] == "2026-09-18"
+    assert c["next_hearing_date"] == "2026-10-28"
+    assert c["limitation_citation"].endswith("Art. 152")
+    assert _links == [("file-9", "c1")]
+    assert _sessions[PHONE][0] == "idle"
+
+
+def test_pdf_case_without_deadline():
+    _card()
+    reply = say("0")
+    assert "Case saved" in reply and "limitation date calculate nahi hui" in reply
+    assert "limitation_deadline" not in _cases[0]
+    assert _cases[0]["next_hearing_date"] == "2026-10-28"
+
+
+def test_pdf_case_suit_article_saves_immediately():
+    _card()
+    reply = say("art 120")                       # not an appeal -> no copy question
+    assert "Case saved" in reply
+
+
+def test_pdf_case_edit_falls_back_to_manual():
+    _card()
+    assert "tafseel" in say("edit")
+    say("art 152")
+    assert "PDF ke mutabiq" in say("My title")
+
+
+def test_pdf_case_skip():
+    _card()
+    assert "case nahi bana" in say("skip")
+    assert _cases == []
+
+
+def test_no_card_when_pdf_has_no_dates():
+    _sessions[PHONE] = ("idle", {})
+    assert offer_case_from_pdf(PHONE, "f", {"court": "X"}) is None
+    assert offer_case_from_pdf(PHONE, "f", None) is None
+
+
+def test_pdf_card_replaces_unfinished_flow():
+    _sessions[PHONE] = ("awaiting_file_case", {"file_id": "old", "case_ids": ["x"]})
+    card = offer_case_from_pdf(PHONE, "file-9", PDF_INFO)
+    assert card and "PDF se case ki details" in card
+    assert _sessions[PHONE][0] == "awaiting_pdf_case"
+
+
+def test_no_pdf_card_during_onboarding():
+    _sessions[PHONE] = ("onboard_city", {})
+    assert offer_case_from_pdf(PHONE, "file-9", PDF_INFO) is None

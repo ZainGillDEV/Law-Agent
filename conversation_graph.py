@@ -150,8 +150,20 @@ def _idle(phone, msg, low, draft):
 
 
 # ---------- Add case: find the article ----------
-def _select_article(phone, art) -> list[str]:
-    draft = {"article": art.article, "case_type": art.label}
+# PDF se aaye case mein yeh keys har step pe saath chalti hain
+CARRY = ("pdf_date", "file_id")
+
+
+def _carry(draft: dict) -> dict:
+    return {k: draft[k] for k in CARRY if draft.get(k)}
+
+
+def _day(d: date) -> str:
+    return d.strftime("%d %b %Y (%A)")
+
+
+def _select_article(phone, art, draft=None) -> list[str]:
+    draft = {"article": art.article, "case_type": art.label, **_carry(draft or {})}
     set_session(phone, "awaiting_title", draft)
     reply = f"✅ *{art.label}*\n⏳ {art.period}, from: {art.starts_from}"
     if art.needs_review:
@@ -160,20 +172,20 @@ def _select_article(phone, art) -> list[str]:
     return [reply]
 
 
-def _start_other(phone) -> list[str]:
-    set_session(phone, "awaiting_custom_type", {})
+def _start_other(phone, draft=None) -> list[str]:
+    set_session(phone, "awaiting_custom_type", _carry(draft or {}))
     return ["Case type ka naam likhein (e.g. *489-F*, *Bail*, *Family*)."]
 
 
 def _case_desc(phone, msg, low, draft):
     if low in OTHER:
-        return _start_other(phone)
+        return _start_other(phone, draft)
 
     # Lawyer ne seedha article number likha: "art 152", "152", "11A".
     # Akela "1"-"9" article nahi maana jata (purane menu ki aadat se galti ho sakti hai).
     art = get_article(msg) if (low.startswith("art") or len(low) >= 2) else None
     if art:
-        return _select_article(phone, art)
+        return _select_article(phone, art, draft)
 
     if len(msg) < 5:
         return ["Thori aur tafseel likhein, ya article number (e.g. *art 152*), ya *other*."]
@@ -184,7 +196,7 @@ def _case_desc(phone, msg, low, draft):
                 "article number likhein (e.g. *art 152*), ya *other* likhein."]
 
     set_session(phone, "awaiting_article_choice",
-                {"suggested": [a.article for a in suggestions], "desc": msg[:300]})
+                {"suggested": [a.article for a in suggestions], "desc": msg[:300], **_carry(draft)})
     lines = ["🔎 *Mumkina articles:*"]
     for i, a in enumerate(suggestions, start=1):
         lines.append(f"\n{i}. {article_card(a)}")
@@ -196,14 +208,14 @@ def _case_desc(phone, msg, low, draft):
 
 def _article_choice(phone, msg, low, draft):
     if low in OTHER:
-        return _start_other(phone)
+        return _start_other(phone, draft)
     suggested = draft.get("suggested", [])
     if low.isdigit() and 1 <= int(low) <= len(suggested):
-        return _select_article(phone, get_article(suggested[int(low) - 1]))
+        return _select_article(phone, get_article(suggested[int(low) - 1]), draft)
     # Lawyer apna article khud likh sakta hai
     art = get_article(msg)
     if art and not low.isdigit():
-        return _select_article(phone, art)
+        return _select_article(phone, art, draft)
     return [f"⚠️ 1 se {len(suggested)} tak number bhejein, *0* (other), "
             "ya article number likhein (e.g. *art 120*)."]
 
@@ -211,7 +223,7 @@ def _article_choice(phone, msg, low, draft):
 def _custom_type(phone, msg, low, draft):
     if len(msg) < 2:
         return ["Case type ka naam likhein (e.g. *489-F*)."]
-    set_session(phone, "awaiting_title", {"article": None, "case_type": msg[:60]})
+    set_session(phone, "awaiting_title", {"article": None, "case_type": msg[:60], **_carry(draft)})
     return [f"✅ {msg[:60]}\nℹ️ Is type ke liye limitation date nahi banegi, sirf hearings track hongi.\n\n"
             "Case ka title likhein (e.g. *Ali vs Ahmed*)."]
 
@@ -224,18 +236,77 @@ def _title(phone, msg, low, draft):
     set_session(phone, "awaiting_filing_date", draft)
     art = get_article(draft["article"]) if draft.get("article") else None
     what = art.starts_from if art else "filing date"
-    return [f"📅 Yeh date bhejein: *{what}*\nFormat: *12/03/2025* ya *12 March 2025*"]
+    reply = f"📅 Yeh date bhejein: *{what}*\nFormat: *12/03/2025* ya *12 March 2025*"
+    if draft.get("pdf_date"):
+        reply += (f"\n\n📄 PDF ke mutabiq faislay ki date: *{_day(date.fromisoformat(draft['pdf_date']))}*\n"
+                  "Agar yahi date hai to *1* bhejein, warna sahi date likhein.")
+    return [reply]
 
 
 def _filing_date(phone, msg, low, draft):
-    d = parse_date(msg)
+    if draft.get("pdf_date") and low in YES:
+        d = date.fromisoformat(draft["pdf_date"])
+    else:
+        d = parse_date(msg)
     if not d:
         return ["⚠️ Date samajh nahi aayi. Aise bhejein: *12/03/2025*"]
     if d > date.today():
         return ["⚠️ Yeh date future mein hai. Guzri hui date bhejein."]
     draft["filing_date"] = d.isoformat()
+    art = get_article(draft["article"]) if draft.get("article") else None
+    confirm = f"✅ Date: {_day(d)}\n\n"
+    if art and art.copy_time_excluded:
+        set_session(phone, "awaiting_copy_applied", draft)
+        return [confirm + "📑 Certified copy ke liye kis date ko apply kiya? (Sec. 12(2) ke tehat "
+                "copy ke din deadline mein jodte hain)\nDate bhejein, ya *skip* likhein."]
     set_session(phone, "awaiting_court", draft)
-    return ["🏛️ Court ka naam likhein (e.g. *Civil Court Lahore*)."]
+    return [confirm + "🏛️ Court ka naam likhein (e.g. *Civil Court Lahore*)."]
+
+
+# ---------- Sec. 12(2): certified copy ke din ----------
+COURT_PROMPT = "🏛️ Court ka naam likhein (e.g. *Civil Court Lahore*)."
+PENDING = {"pending", "abhi nahi", "nahi mili", "not yet", "abhi nahi mili"}
+
+
+def _after_copy(phone, draft, prefix: str) -> list[str]:
+    """Copy ke sawalon ke baad: PDF wala case seedha save, warna court poochho."""
+    if draft.get("from_pdf"):
+        return [prefix.strip()] + _save_case(phone, draft)
+    set_session(phone, "awaiting_court", draft)
+    return [prefix + COURT_PROMPT]
+
+
+def _copy_applied(phone, msg, low, draft):
+    if low in SKIP:
+        return _after_copy(phone, draft, "👍 Copy ke din shamil nahi honge.\n\n")
+    d = parse_date(msg)
+    if not d:
+        return ["⚠️ Date samajh nahi aayi. *20/09/2026* jaisi date bhejein, ya *skip* likhein."]
+    if d < date.fromisoformat(draft["filing_date"]):
+        return ["⚠️ Copy ki darkhwast faislay se pehle nahi ho sakti. Sahi date bhejein, ya *skip*."]
+    if d > date.today():
+        return ["⚠️ Yeh date future mein hai. Sahi date bhejein, ya *skip*."]
+    draft["copy_applied"] = d.isoformat()
+    set_session(phone, "awaiting_copy_received", draft)
+    return ["📑 Certified copy kis date ko mili (ya tayyar hui)?\n"
+            "Date bhejein, ya agar abhi nahi mili to *pending* likhein."]
+
+
+def _copy_received(phone, msg, low, draft):
+    if low in PENDING:
+        draft["copy_pending"] = True
+        return _after_copy(phone, draft,
+                           "👍 Copy pending hai. Abhi sab se pehli mumkina deadline dikhayi jayegi.\n\n")
+    d = parse_date(msg)
+    if not d:
+        return ["⚠️ Date samajh nahi aayi. Date bhejein, ya *pending* likhein."]
+    if d < date.fromisoformat(draft["copy_applied"]):
+        return ["⚠️ Copy darkhwast se pehle nahi mil sakti. Sahi date bhejein."]
+    if d > date.today():
+        return ["⚠️ Yeh date future mein hai. Agar copy abhi nahi mili to *pending* likhein."]
+    draft["copy_received"] = d.isoformat()
+    days = (d - date.fromisoformat(draft["copy_applied"])).days
+    return _after_copy(phone, draft, f"✅ Copy mein {days} din lage.\n\n")
 
 
 def _court(phone, msg, low, draft):
@@ -255,11 +326,16 @@ def _next_hearing(phone, msg, low, draft):
             return ["⚠️ Date samajh nahi aayi. *15/10/2026* jaisi date bhejein ya *skip* likhein."]
         draft["next_hearing_date"] = d.isoformat()
     set_session(phone, "confirm_summary", draft)
+    copy_line = ""
+    if draft.get("copy_applied"):
+        received = "pending" if draft.get("copy_pending") else _fmt(draft.get("copy_received"))
+        copy_line = f"Certified copy: apply {_fmt(draft['copy_applied'])}, mili {received}\n"
     return [
         "📋 *Please confirm:*\n"
         f"Type: {draft['case_type']}\n"
         f"Title: {draft['title']}\n"
         f"Date: {_fmt(draft['filing_date'])}\n"
+        + copy_line +
         f"Court: {draft['court']}\n"
         f"Next hearing: {_fmt(draft.get('next_hearing_date'))}\n\n"
         "1. ✅ Save\n2. ❌ Cancel"
@@ -272,20 +348,33 @@ def _confirm(phone, msg, low, draft):
         return ["❌ Case save nahi hua.", MAIN_MENU]
     if low not in YES:
         return ["*1* (save) ya *2* (cancel) bhejein."]
+    return _save_case(phone, draft)
 
+
+def _save_case(phone, draft) -> list[str]:
+    """Draft ko database mein save karo, deadline banao, PDF ho to jodo."""
     row = {
         "lawyer_phone": phone,
         "case_type": draft["case_type"],
         "title": draft["title"],
         "filing_date": draft["filing_date"],
-        "court": draft["court"],
+        "court": draft.get("court"),
         "next_hearing_date": draft.get("next_hearing_date"),
     }
+    for src, col in (("copy_applied", "copy_applied_date"), ("copy_received", "copy_received_date"),
+                     ("case_number", "case_number")):
+        if draft.get(src):
+            row[col] = draft[src]
     replies = ["✅ *Case saved!*"]
 
     if draft.get("article"):
         # Deterministic engine — LLM kabhi deadline nahi banata
-        result = compute_deadline(draft["article"], date.fromisoformat(draft["filing_date"]))
+        _d = lambda k: date.fromisoformat(draft[k]) if draft.get(k) else None  # noqa: E731
+        result = compute_deadline(
+            draft["article"], date.fromisoformat(draft["filing_date"]),
+            copy_applied=_d("copy_applied"), copy_received=_d("copy_received"),
+            copy_pending=bool(draft.get("copy_pending")),
+        )
         row["limitation_deadline"] = result.deadline.isoformat()
         row["limitation_citation"] = result.article.citation
         replies.append(format_deadline_reply(result))
@@ -294,12 +383,104 @@ def _confirm(phone, msg, low, draft):
             replies.append("🚨 *Yeh deadline guzar chuki hai.* Case 'time-barred' mark hua hai. "
                            "Condonation of delay ke options khud check karein.")
     else:
-        replies.append("ℹ️ Is case type ke liye limitation date calculate nahi hui. "
+        replies.append("ℹ️ Is case ke liye limitation date calculate nahi hui. "
                        f"Hearing reminders milenge.\n\n{DISCLAIMER}")
 
-    insert_case(row)
+    saved = insert_case(row)
+    if draft.get("file_id") and saved and saved.get("case_id"):
+        link_file_to_case(phone, draft["file_id"], saved["case_id"])
+        replies.append("📎 PDF is case se jod di gayi.")
     set_session(phone, "idle")
     return replies
+
+
+# ---------- PDF se pura case ----------
+PDF_FIELDS = ("title", "court", "case_number", "filing_date", "next_hearing_date")
+
+
+def offer_case_from_pdf(phone: str, file_id: str, info: dict | None) -> str | None:
+    """PDF se nikli details ka card dikhao; lawyer sirf article chune to case ban jaye.
+    PDF bhejna khud naya kaam hai, is liye koi adhoora flow ho to woh band ho jata hai
+    (sirf onboarding ke dauran card nahi aata). Kaam ki details na milein to None."""
+    step, _ = get_session(phone)
+    if step in ONBOARDING_STEPS or not info or \
+            not (info.get("decision_date") or info.get("next_hearing_date")):
+        return None
+
+    suggestions = []
+    if info.get("decision_date"):
+        question = info.get("deadline_question") or \
+            f"Appeal or review against {info.get('document_type') or 'decision'} of {info.get('court') or 'court'}"
+        suggestions = suggest_articles(question)
+
+    draft = {
+        "from_pdf": True,
+        "file_id": file_id,
+        "title": info.get("case_title") or info.get("case_number") or "Case from PDF",
+        "court": info.get("court"),
+        "case_number": info.get("case_number"),
+        "filing_date": info.get("decision_date"),
+        "next_hearing_date": info.get("next_hearing_date"),
+        "doc_type": info.get("document_type"),
+        "suggested": [a.article for a in suggestions],
+    }
+    set_session(phone, "awaiting_pdf_case", draft)
+
+    lines = ["📄 *PDF se case ki details:*",
+             f"Title: {draft['title']}",
+             f"Court: {draft['court'] or '—'}",
+             f"Case no.: {draft['case_number'] or '—'}",
+             f"Faisla: {_day(date.fromisoformat(draft['filing_date'])) if draft['filing_date'] else '—'}",
+             f"Next hearing: {_fmt(draft['next_hearing_date'])}"]
+    if suggestions:
+        lines.append("\n🔎 *Deadline kis cheez ki chahiye?* (AI suggestion)")
+        for i, a in enumerate(suggestions, start=1):
+            lines.append(f"\n{i}. {article_card(a)}")
+        lines.append("\nYa koi aur article likhein (e.g. *art 120*).")
+    lines.append("\n0. Case save karein, deadline ke baghair (sirf hearing reminders)")
+    lines.append("*edit*: details khud bharein  •  *skip*: sirf file rakhein")
+    lines.append("\n⚠️ Details AI ne PDF se parhi hain. Save se pehle check karein.")
+    return "\n".join(lines)
+
+
+def _pdf_case(phone, msg, low, draft):
+    if low in SKIP:
+        set_session(phone, "idle")
+        return ["👍 File save ho gayi, case nahi bana.", MAIN_MENU]
+    if low == "edit":
+        set_session(phone, "awaiting_case_desc",
+                     {"file_id": draft["file_id"], "pdf_date": draft.get("filing_date")}
+                     if draft.get("filing_date") else {"file_id": draft["file_id"]})
+        return [CASE_DESC_PROMPT]
+
+    case = {k: draft.get(k) for k in PDF_FIELDS} | {"from_pdf": True, "file_id": draft["file_id"]}
+
+    if low == "0":
+        if not case["filing_date"]:
+            case["filing_date"] = date.today().isoformat()
+        case["article"] = None
+        case["case_type"] = (draft.get("doc_type") or "Case from PDF")[:60]
+        return _save_case(phone, case)
+
+    suggested = draft.get("suggested", [])
+    art = None
+    if low.isdigit() and 1 <= int(low) <= len(suggested):
+        art = get_article(suggested[int(low) - 1])
+    elif not low.isdigit():
+        art = get_article(msg)
+    if not art:
+        opts = f"1 se {len(suggested)} tak number, " if suggested else ""
+        return [f"⚠️ {opts}*0*, koi article (e.g. *art 120*), *edit* ya *skip* bhejein."]
+    if not case["filing_date"]:
+        return ["⚠️ PDF mein faislay ki date nahi mili. *edit* likh kar date khud bharein, ya *0* bhejein."]
+
+    case["article"] = art.article
+    case["case_type"] = art.label
+    if art.copy_time_excluded:
+        set_session(phone, "awaiting_copy_applied", case)
+        return [f"✅ *{art.label}*\n\n📑 Certified copy ke liye kis date ko apply kiya? "
+                "(Sec. 12(2))\nDate bhejein, ya *skip* likhein."]
+    return [f"✅ *{art.label}*"] + _save_case(phone, case)
 
 
 # ---------- List cases ----------
@@ -384,6 +565,9 @@ STEPS = {
     "awaiting_custom_type": _custom_type,
     "awaiting_title": _title,
     "awaiting_filing_date": _filing_date,
+    "awaiting_copy_applied": _copy_applied,
+    "awaiting_copy_received": _copy_received,
+    "awaiting_pdf_case": _pdf_case,
     "awaiting_court": _court,
     "awaiting_next_hearing": _next_hearing,
     "confirm_summary": _confirm,
